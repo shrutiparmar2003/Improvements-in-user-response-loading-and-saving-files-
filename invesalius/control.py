@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import wx
+import threading
 
 import invesalius.constants as const
 import invesalius.data.imagedata_utils as image_utils
@@ -345,31 +346,46 @@ class Controller:
             dialog.InexistentPath(filepath)
 
     def OpenProject(self, filepath: "str | Path") -> None:
+        from invesalius.gui.frame import ProgressDialog
+
         Publisher.sendMessage("Begin busy cursor")
         path = os.path.abspath(filepath)
 
-        proj = prj.Project()
-        proj.OpenPlistProject(path)
-        proj.SetAcquisitionModality(proj.modality)
-        self.Slice = sl.Slice()
-        self.Slice._open_image_matrix(
-            proj.matrix_filename, tuple(proj.matrix_shape), proj.matrix_dtype
-        )
+        # Show progress dialog
+        progress = ProgressDialog(self.frame, title="Loading .inv3", message="Loading project...")
+        progress.Show()
 
-        self.Slice.window_level = proj.level
-        self.Slice.window_width = proj.window
-        if proj.affine:
-            self.Slice.affine = np.asarray(proj.affine).reshape(4, 4)
-        else:
-            self.Slice.affine = np.identity(4)
+        def load_thread():
+            proj = prj.Project()
+            progress.update_progress(0, "Opening file...")
+            proj.OpenPlistProject(path)
+            proj.SetAcquisitionModality(proj.modality)
+            self.Slice = sl.Slice()
+            progress.update_progress(50, "Loading project data...")
+            self.Slice._open_image_matrix(
+                proj.matrix_filename, tuple(proj.matrix_shape), proj.matrix_dtype
+            )
 
-        Publisher.sendMessage("Update threshold limits list", threshold_range=proj.threshold_range)
+            self.Slice.window_level = proj.level
+            self.Slice.window_width = proj.window
+            if proj.affine:
+                self.Slice.affine = np.asarray(proj.affine).reshape(4, 4)
+            else:
+                self.Slice.affine = np.identity(4)
 
-        self.LoadProject()
+            Publisher.sendMessage("Update threshold limits list", threshold_range=proj.threshold_range)
 
-        session = ses.Session()
-        session.OpenProject(filepath)
-        Publisher.sendMessage("Enable state project", state=True)
+            progress.update_progress(75, "Finalizing...")
+            self.LoadProject()
+
+            session = ses.Session()
+            session.OpenProject(filepath)
+            Publisher.sendMessage("Enable state project", state=True)
+
+            wx.CallAfter(progress.Close)
+
+        import threading
+        threading.Thread(target=load_thread).start()
 
     def OnSaveProject(self, filepath: Optional["str | Path"]) -> None:
         self.SaveProject(filepath)
@@ -953,16 +969,28 @@ class Controller:
         Publisher.sendMessage("Enable state project", state=True)
 
     def OnOpenOtherFiles(self, filepath: bytes) -> None:
+        from invesalius.gui.frame import ProgressDialog
+
         filepath = utils.decode(filepath, const.FS_ENCODE)
         if (filepath) is not None:
             name = os.path.basename(filepath).split(".")[0]
             group = oth.ReadOthers(filepath)
             if group:
-                matrix, matrix_filename = self.OpenOtherFiles(group)
-                self.CreateOtherProject(name, matrix, matrix_filename)
-                self.LoadProject()
+                progress = ProgressDialog(self.frame, title="Loading .nii", message="Loading files...")
+                progress.Show()
 
-                Publisher.sendMessage("Enable state project", state=True)
+                def load_thread():
+                    progress.update_progress(0, "Reading file...")
+                    matrix, matrix_filename = self.OpenOtherFiles(group)
+                    progress.update_progress(50, "Creating project...")
+                    self.CreateOtherProject(name, matrix, matrix_filename)
+                    progress.update_progress(75, "Loading project...")
+                    self.LoadProject()
+
+                    Publisher.sendMessage("Enable state project", state=True)
+                    wx.CallAfter(progress.Close)
+
+                threading.Thread(target=load_thread).start()
             else:
                 dialog.ImportInvalidFiles(ftype="Others")
 
