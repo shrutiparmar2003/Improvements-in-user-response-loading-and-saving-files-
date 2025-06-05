@@ -38,7 +38,7 @@ if sys.platform == "win32":
     try:
         import winreg
     except ImportError:
-        import _winreg as winreg
+        import winreg as winreg
 #  else:
 #  if sys.platform != 'darwin':
 #  import wxversion
